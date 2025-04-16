@@ -10,7 +10,7 @@
     </parent>
 
     <artifactId>image-service</artifactId>
-    <name>image</name>
+
     <description>Image processing service module</description>
 
 

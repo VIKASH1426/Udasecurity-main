@@ -7,7 +7,6 @@
   </parent>
   <modelVersion>4.0.0</modelVersion>
   <artifactId>security-service</artifactId>
-  <name>security</name>
   <description>Security system core logic and GUI module</description>
   <build>
     <plugins>

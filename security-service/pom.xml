@@ -10,7 +10,7 @@
     </parent>
 
     <artifactId>security-service</artifactId>
-    <name>security</name>
+
     <description>Security system core logic and GUI module</description>
     <properties> <mockito.version>5.16.1</mockito.version>
         <junit.version>5.13.0-M2</junit.version></properties>
@@ -31,7 +31,8 @@
         </dependency>
         <dependency>
             <groupId>com.udacity.catpoint</groupId>
-            <artifactId>image</artifactId>
+            <artifactId>image-service</artifactId>
+            <version>1.0-SNAPSHOT</version>
         </dependency>
 
         <dependency>
