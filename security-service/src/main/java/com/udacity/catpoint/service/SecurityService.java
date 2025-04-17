@@ -1,247 +1,161 @@
 package com.udacity.catpoint.service;
-import com.udacity.catpoint.image.ImageService;
+
 import com.udacity.catpoint.application.StatusListener;
 import com.udacity.catpoint.data.AlarmStatus;
 import com.udacity.catpoint.data.ArmingStatus;
 import com.udacity.catpoint.data.SecurityRepository;
 import com.udacity.catpoint.data.Sensor;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.udacity.catpoint.image.ImageService;
+
 import java.awt.image.BufferedImage;
+import java.util.Collections;
 import java.util.Set;
-import java.util.concurrent.CopyOnWriteArraySet;
-public class SecurityService{
-    private final ImageService imageService;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Objects;
+
+public final class SecurityService {
     private final SecurityRepository securityRepository;
-    private final Set<StatusListener> statusListeners = new CopyOnWriteArraySet<>();
-    private boolean catDetectedCurrently = false; // Flag to store cat detection status
-    private static final Logger log = LoggerFactory.getLogger(SecurityService.class);
+    private final ImageService imageService;
+    private final Set<StatusListener> statusListeners = ConcurrentHashMap.newKeySet();
+    private volatile boolean catDetected = false;
+
     public SecurityService(SecurityRepository securityRepository, ImageService imageService) {
-        if (securityRepository == null){
-            throw new IllegalArgumentException("SecurityRepository cannot be null");
-        }
-        if (imageService == null){
-            throw new IllegalArgumentException("ImageService cannot be null");
-        }
-        this.securityRepository =securityRepository;
-        this.imageService= imageService;
+        this.securityRepository = Objects.requireNonNull(securityRepository, "SecurityRepository cannot be null");
+        this.imageService = Objects.requireNonNull(imageService, "ImageService cannot be null");
     }
-    public synchronized void setArmingStatus(ArmingStatus armingStatus){
-        if (armingStatus == null){
-            log.warn("Attempted to set null arming status. Ignoring.");
-            return;
-        }
-        ArmingStatus previousArmingStatus = getArmingStatus();
-        if(armingStatus == ArmingStatus.DISARMED){
-            setAlarmStatus(AlarmStatus.NO_ALARM);
-            securityRepository.setArmingStatus(armingStatus);
-            log.info("System status set to DISARMED");
-            return;
-        }
-        Set<Sensor> currentSensors = getSensors();
-        log.info("Arming system to {}. Resetting sensors.", armingStatus);
-        for (Sensor sensor : Set.copyOf(currentSensors)) {
-            if (sensor != null && Boolean.TRUE.equals(sensor.getActive())){
-                changeSensorActivationStatus(sensor, false);
-                log.debug("Deactivated sensor '{}' during arming.", sensor.getName());
+
+    public void setArmingStatus(ArmingStatus armingStatus) {
+        Objects.requireNonNull(armingStatus, "ArmingStatus cannot be null");
+
+        if (armingStatus != ArmingStatus.DISARMED) {
+            deactivateAllSensors();
+            if (armingStatus == ArmingStatus.ARMED_HOME && catDetected) {
+                setAlarmStatus(AlarmStatus.ALARM);
             }
+        } else {
+            setAlarmStatus(AlarmStatus.NO_ALARM);
         }
         securityRepository.setArmingStatus(armingStatus);
-        log.info("System status set to {}", armingStatus);
-        if (armingStatus == ArmingStatus.ARMED_HOME && this.catDetectedCurrently){
-            log.info("Cat detected flag is true while arming home, setting alarm.");
-            setAlarmStatus(AlarmStatus.ALARM);
-        }
     }
-    public synchronized boolean isCatCurrentlyDetected() {
-        return this.catDetectedCurrently;
-    }
-    private synchronized void handleCatDetectionLogic(boolean cat) {
-        this.catDetectedCurrently = cat;
-        log.debug("Cat detection status updated to: {}", cat);
-        ArmingStatus currentArmingStatus = getArmingStatus();
-        if (cat && currentArmingStatus == ArmingStatus.ARMED_HOME) {
-            log.info("Cat detected while armed home, setting alarm.");
-            setAlarmStatus(AlarmStatus.ALARM);
-        }
-        else if (!cat){
-            if (areAllSensorsInactive()){
-                log.info("No cat detected and sensors inactive, setting to no alarm.");
-                setAlarmStatus(AlarmStatus.NO_ALARM);
-            } else {
-                log.debug("No cat detected, but sensors are active. Alarm status unchanged by image.");
+
+    private void deactivateAllSensors() {
+        getSensors().forEach(sensor -> {
+            boolean wasActive = sensor.getActive();
+            sensor.setActive(false);
+            if (wasActive || getArmingStatus() != ArmingStatus.DISARMED) {
+                securityRepository.updateSensor(sensor);
             }
-        }
-        statusListeners.forEach(sl -> sl.catDetected(cat));
+        });
     }
-    public void addStatusListener(StatusListener statusListener){
-        if (statusListener != null){
-            statusListeners.add(statusListener);
-            log.debug("Added status listener: {}", statusListener.getClass().getSimpleName());
-        }
-    }
-    public void removeStatusListener(StatusListener statusListener){
-        if (statusListener != null) {
-            if (statusListeners.remove(statusListener)) {
-                log.debug("Removed status listener: {}", statusListener.getClass().getSimpleName());
-            }
-        }
-    }
-    public synchronized void setAlarmStatus(AlarmStatus status) {
-        if (status == null) {
-            log.warn("Attempted to set null alarm status. Ignoring.");
+
+    public void changeSensorActivationStatus(Sensor sensor, Boolean active) {
+        Objects.requireNonNull(sensor, "Sensor cannot be null");
+        Objects.requireNonNull(active, "Active status cannot be null");
+
+        if (getAlarmStatus() == AlarmStatus.ALARM) {
             return;
         }
-        ArmingStatus currentArmingStatus = securityRepository.getArmingStatus();
-        if (currentArmingStatus == null) {
-            log.error("ArmingStatus from repository is null, cannot reliably set alarm status.");
-            if (status == AlarmStatus.PENDING_ALARM || status == AlarmStatus.ALARM) {
-                log.warn("Preventing setting PENDING/ALARM because ArmingStatus is null.");
-                return;
-            }
-        }
-        else {
-            if ((status == AlarmStatus.PENDING_ALARM || status == AlarmStatus.ALARM) && currentArmingStatus == ArmingStatus.DISARMED) {
-                log.debug("Ignoring {} status change while system is DISARMED.", status);
-                return;
-            }
-        }
-        AlarmStatus currentRepoAlarmStatus = securityRepository.getAlarmStatus();
-        if (currentRepoAlarmStatus != status) {
-            log.info("Changing alarm status from {} to {}", currentRepoAlarmStatus, status);
-            securityRepository.setAlarmStatus(status);
-            statusListeners.forEach(sl -> sl.notify(status));
-        } else {
-            log.trace("Alarm status already {}, no change needed.", status);
-        }
-    }
-    private synchronized void handleSensorActivated(){
-        ArmingStatus armingStatus = getArmingStatus();
-        if (armingStatus == ArmingStatus.DISARMED) {
-            log.debug("Sensor activated while DISARMED. No status change.");
-            return;
-        }
-        AlarmStatus currentAlarmStatus = getAlarmStatus();
-        if (currentAlarmStatus == null) {
-            log.error("Cannot handle sensor activation: currentAlarmStatus is null.");
-            return;
-        }
-        switch (currentAlarmStatus){
-            case NO_ALARM:
-                log.info("Sensor activated while ARMED/NO_ALARM. Setting PENDING_ALARM.");
-                setAlarmStatus(AlarmStatus.PENDING_ALARM);
-                break;
-            case PENDING_ALARM:
-                log.info("Sensor activated while PENDING_ALARM. Setting ALARM.");
-                setAlarmStatus(AlarmStatus.ALARM);
-                break;
-            case ALARM:
-                log.debug("Sensor activated while ALARM. No status change.");
-                break;
-        }
-    }
-    private synchronized void handleSensorDeactivated(){
-        AlarmStatus currentAlarmStatus = getAlarmStatus();
-        if (currentAlarmStatus == null) {
-            log.error("Cannot handle sensor deactivation: currentAlarmStatus is null.");
-            return;
-        }
-        if (currentAlarmStatus == AlarmStatus.ALARM){
-            log.debug("Sensor deactivated while ALARM. No status change.");
-            return;
-        }
-        if (currentAlarmStatus == AlarmStatus.PENDING_ALARM){
-            if (areAllSensorsInactive()) {
-                log.info("Sensor deactivated while PENDING_ALARM, and all sensors now inactive. Setting NO_ALARM.");
-                setAlarmStatus(AlarmStatus.NO_ALARM);
-            } else {
-                log.debug("Sensor deactivated while PENDING_ALARM, but other sensors still active.");
-            }
-        }
-        else if (currentAlarmStatus == AlarmStatus.NO_ALARM){
-            log.debug("Sensor deactivated while NO_ALARM. No status change.");
-        }
-    }
-    private synchronized boolean areAllSensorsInactive(){
-        Set<Sensor> sensors = getSensors();
-        if (sensors == null){
-            log.warn("Sensor set from repository is null. Assuming sensors are inactive for safety.");
-            return true;
-        }
-        return sensors.stream().noneMatch(sensor -> sensor != null && Boolean.TRUE.equals(sensor.getActive()));
-    }
-    public synchronized void changeSensorActivationStatus(Sensor sensor, boolean active) {
-        if (sensor == null){
-            log.warn("Attempted to change activation status for a null sensor. Ignoring.");
-            return;
-        }
-        Boolean currentSensorActiveState = sensor.getActive();
-        boolean currentStateIsTrue = Boolean.TRUE.equals(currentSensorActiveState);
-        if (currentStateIsTrue == active) {
-            log.trace("Sensor {} activation status ({}) already matches target state {}. No change needed.", sensor.getName(), currentSensorActiveState, active);
-            return;
-        }
-        log.info("Changing sensor '{}' (ID: {}) activation status from {} to {}",
-                sensor.getName(), sensor.getSensorId(), currentSensorActiveState, active);
+
+        boolean wasActive = sensor.getActive();
         sensor.setActive(active);
         securityRepository.updateSensor(sensor);
 
-        if (active){
-            handleSensorActivated();
+        handleSensorStateChange(wasActive, active);
+    }
+
+    private void handleSensorStateChange(boolean wasActive, boolean isActive) {
+        AlarmStatus alarmStatus = getAlarmStatus();
+
+        if (isActive) {
+            handleSensorActivation(alarmStatus, wasActive);
+        } else if (wasActive) {
+            handleSensorDeactivation(alarmStatus);
+        }
+    }
+
+    private void handleSensorActivation(AlarmStatus alarmStatus, boolean wasActive) {
+        if (getArmingStatus() == ArmingStatus.DISARMED) return;
+
+        if (alarmStatus == AlarmStatus.PENDING_ALARM || wasActive) {
+            setAlarmStatus(AlarmStatus.ALARM);
         } else {
-            handleSensorDeactivated();
+            setAlarmStatus(AlarmStatus.PENDING_ALARM);
         }
-        statusListeners.forEach(StatusListener::sensorStatusChanged);
     }
-    public void processImage(BufferedImage currentCameraImage){
-        try {
-            boolean catDetected = false;
-            if (currentCameraImage != null) {
-                if (this.imageService == null) {
-                    log.error("ImageService is null. Cannot process image.");
-                    handleCatDetectionLogic(false);
-                    return;
-                }
-                catDetected = imageService.imageContainsCat(currentCameraImage, 50.0f);
-                log.debug("Image processed. Cat detected: {}", catDetected);
-            } else{
-                log.debug("processImage called with null image, assuming no cat.");
-                catDetected = false;
+
+    private void handleSensorDeactivation(AlarmStatus alarmStatus) {
+        if (alarmStatus == AlarmStatus.PENDING_ALARM) {
+            checkSensorsAndUpdateStatus();
+        }
+    }
+
+    public void processImage(BufferedImage image) {
+        if (image == null) return;
+
+        catDetected = imageService.imageContainsCat(image, 50.0f);
+        evaluateCatDetection();
+    }
+
+    private void evaluateCatDetection() {
+        if (catDetected && getArmingStatus() == ArmingStatus.ARMED_HOME) {
+            setAlarmStatus(AlarmStatus.ALARM);
+        } else if (!catDetected && allSensorsInactive()) {
+            if (getAlarmStatus() != AlarmStatus.ALARM) {
+                setAlarmStatus(AlarmStatus.NO_ALARM);
             }
-            handleCatDetectionLogic(catDetected);
-        } catch (Exception e) {
-            log.error("Error processing image: {}. Assuming no cat detected.", e.getMessage(), e);
-            handleCatDetectionLogic(false);
         }
+        notifyCatDetection();
     }
-    public synchronized AlarmStatus getAlarmStatus() {
+
+    private boolean allSensorsInactive() {
+        return getSensors().stream().noneMatch(Sensor::getActive);
+    }
+
+    private void notifyCatDetection() {
+        statusListeners.forEach(listener -> listener.catDetected(catDetected));
+    }
+
+    public AlarmStatus getAlarmStatus() {
         return securityRepository.getAlarmStatus();
     }
 
-    public synchronized ArmingStatus getArmingStatus() {
+    public Set<Sensor> getSensors() {
+        return Collections.unmodifiableSet(securityRepository.getSensors());
+    }
+
+    public void addSensor(Sensor sensor) {
+        Objects.requireNonNull(sensor, "Sensor cannot be null");
+        securityRepository.addSensor(sensor);
+    }
+
+    public void removeSensor(Sensor sensor) {
+        Objects.requireNonNull(sensor, "Sensor cannot be null");
+        securityRepository.removeSensor(sensor);
+    }
+
+    public ArmingStatus getArmingStatus() {
         return securityRepository.getArmingStatus();
     }
 
-    public synchronized Set<Sensor> getSensors(){
-        Set<Sensor> sensors = securityRepository.getSensors();
-        return (sensors != null) ? Set.copyOf(sensors) : Set.of();
+    public void addStatusListener(StatusListener statusListener) {
+        Objects.requireNonNull(statusListener, "StatusListener cannot be null");
+        statusListeners.add(statusListener);
     }
-    public synchronized void addSensor(Sensor sensor){
-        if (sensor != null) {
-            log.info("Adding sensor: {} (ID: {})", sensor.getName(), sensor.getSensorId());
-            securityRepository.addSensor(sensor);
-            statusListeners.forEach(StatusListener::sensorStatusChanged);
-        } else {
-            log.warn("Attempted to add null sensor.");
-        }
+
+    public void removeStatusListener(StatusListener statusListener) {
+        Objects.requireNonNull(statusListener, "StatusListener cannot be null");
+        statusListeners.remove(statusListener);
     }
-    public synchronized void removeSensor(Sensor sensor){
-        if (sensor != null){
-            log.info("Removing sensor: {} (ID: {})", sensor.getName(), sensor.getSensorId());
-            securityRepository.removeSensor(sensor);
-            handleSensorDeactivated();
-            statusListeners.forEach(StatusListener::sensorStatusChanged);
+
+    public void setAlarmStatus(AlarmStatus status) {
+        Objects.requireNonNull(status, "AlarmStatus cannot be null");
+        securityRepository.setAlarmStatus(status);
+        statusListeners.forEach(listener -> listener.notify(status));
+    }
+
+    public void checkSensorsAndUpdateStatus() {
+        if (getAlarmStatus() == AlarmStatus.PENDING_ALARM && allSensorsInactive()) {
+            setAlarmStatus(AlarmStatus.NO_ALARM);
         }
-        else{log.warn("Attempted to remove null sensor.");}
     }
 }
